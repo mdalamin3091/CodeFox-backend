@@ -2,6 +2,8 @@ import express, { Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
+import { toNodeHandler } from 'better-auth/node';
+import { auth } from './lib/auth';
 import routes from './routes';
 import errorMiddleware from './middlewares/error.middleware';
 import ApiError from './utils/ApiError';
@@ -10,37 +12,37 @@ import logger from './utils/logger';
 const createApp = () => {
   const app = express();
 
-  // Security headers
   app.use(helmet());
 
-  // CORS
-  app.use(cors());
+  app.use(
+    cors({
+      origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+      credentials: true,
+    }),
+  );
 
-  // HTTP request logging
   app.use(
     morgan('combined', {
       stream: { write: (message) => logger.http(message.trim()) },
     }),
   );
 
-  // Body parsing
+  // better-auth handles its own body parsing — mount BEFORE express.json()
+  app.all('/api/auth/*', toNodeHandler(auth));
+
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // Health check
   app.get('/health', (_req: Request, res: Response) => {
     res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
-  // API routes
   app.use('/api', routes);
 
-  // 404 handler
   app.use((_req: Request, _res: Response, next: NextFunction) => {
     next(new ApiError(404, 'Route not found'));
   });
 
-  // Global error handler
   app.use(errorMiddleware);
 
   return app;

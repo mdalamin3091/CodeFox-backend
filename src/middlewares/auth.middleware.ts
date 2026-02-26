@@ -1,57 +1,38 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import config from '../config';
+import { fromNodeHeaders } from 'better-auth/node';
+import { auth } from '../lib/auth';
 import ApiError from '../utils/ApiError';
-import prisma from '../config/prisma';
-
-interface JwtPayload {
-  userId: string;
-  email: string;
-}
 
 declare global {
   namespace Express {
     interface Request {
       user?: {
         id: string;
-        email: string;
         name: string;
+        email: string;
+        emailVerified: boolean;
+        image?: string | null;
+        createdAt: Date;
+        updatedAt: Date;
       };
     }
-  } }
+  }
+}
 
 const authMiddleware = async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
   try {
-    const authHeader = req.headers.authorization;
-
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new ApiError(401, 'No token provided');
-    }
-
-    const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, config.jwt.secret) as JwtPayload;
-
-    const user = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-      select: { id: true, email: true, name: true },
+    const session = await auth.api.getSession({
+      headers: fromNodeHeaders(req.headers),
     });
 
-    if (!user) {
-      throw new ApiError(401, 'User no longer exists');
+    if (!session) {
+      throw new ApiError(401, 'Unauthorized');
     }
 
-    req.user = user;
+    req.user = session.user;
     next();
   } catch (err) {
-    if (err instanceof ApiError) {
-      next(err);
-    } else if (err instanceof jwt.JsonWebTokenError) {
-      next(new ApiError(401, 'Invalid token'));
-    } else if (err instanceof jwt.TokenExpiredError) {
-      next(new ApiError(401, 'Token expired'));
-    } else {
-      next(err);
-    }
+    next(err);
   }
 };
 

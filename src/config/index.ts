@@ -5,12 +5,13 @@ dotenv.config();
 const config = {
   env: process.env.NODE_ENV || 'development',
   port: parseInt(process.env.PORT || '3000', 10),
-  jwt: {
-    secret: process.env.JWT_SECRET || 'fallback-secret-change-in-production',
-    expiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  betterAuth: {
+    secret: process.env.BETTER_AUTH_SECRET || 'fallback-secret-change-in-production',
+    url: process.env.BETTER_AUTH_URL || 'http://localhost:3000',
   },
-  database: {
-    url: process.env.DATABASE_URL || '',
+  github: {
+    clientId: process.env.GITHUB_CLIENT_ID || '',
+    clientSecret: process.env.GITHUB_CLIENT_SECRET || '',
   },
 };
 
