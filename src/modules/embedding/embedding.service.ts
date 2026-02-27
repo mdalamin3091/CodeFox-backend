@@ -46,6 +46,21 @@ const EXCLUDED_EXTENSIONS = new Set([
   '.env', '.pem', '.key', '.cert', '.p12', '.pfx',
 ]);
 
+/**
+ * Helper to strip Git metadata and symbols from a diff 
+ * to improve embedding accuracy.
+ */
+function cleanDiff(diff: string): string {
+  return diff
+    .split('\n')
+    // Remove lines starting with diff markers or location headers
+    .filter(line => !line.startsWith('diff --git') && !line.startsWith('index ') && !line.startsWith('+++') && !line.startsWith('---') && !line.startsWith('@@'))
+    // Remove the leading + and - symbols from code lines
+    .map(line => line.replace(/^[+-]/, ''))
+    .join('\n')
+    .trim();
+}
+
 // --------------------------------------------------------------------------
 // Gemini embedding via REST (v1) — both official SDKs default to v1beta
 // which does not expose text-embedding-004
@@ -272,12 +287,14 @@ export async function embedRepository(repoId: string): Promise<void> {
 // PR diff analysis — embed diff, query Pinecone, store relevant files
 // --------------------------------------------------------------------------
 
+
 export async function analyzePrDiff(prId: string): Promise<void> {
   const pr = await prisma.pullRequest.findUnique({
     where: { id: prId },
     select: { id: true, number: true, diff: true, repositoryId: true },
   });
 
+  console.log("pr", pr);
   if (!pr?.diff) {
     logger.warn(`PR analysis [prId=${prId}]: no diff available, skipping`);
     return;
@@ -289,11 +306,16 @@ export async function analyzePrDiff(prId: string): Promise<void> {
   });
 
   try {
-    // 1. Embed the diff (truncated to avoid token limits)
-    const diffText = pr.diff.length > MAX_CONTENT_CHARS ? pr.diff.slice(0, MAX_CONTENT_CHARS) : pr.diff;
+    // 1. Clean and Truncate the diff
+    const cleanedDiff = cleanDiff(pr.diff);
+    const diffText = cleanedDiff.length > MAX_CONTENT_CHARS 
+      ? cleanedDiff.slice(0, MAX_CONTENT_CHARS) 
+      : cleanedDiff;
+
+    // 2. Embed the cleaned logic
     const [diffVector] = await batchEmbed([diffText], config.googleAiApiKey);
 
-    // 2. Query Pinecone namespace for this repo (top 10 most similar files)
+    // 3. Query Pinecone
     const pinecone = new Pinecone({ apiKey: config.pineconeApiKey });
     const index = pinecone.index({ name: config.pineconeIndex }).namespace(pr.repositoryId);
 
@@ -303,22 +325,35 @@ export async function analyzePrDiff(prId: string): Promise<void> {
       includeMetadata: true,
     });
 
-    const relevantFiles = queryResult.matches.map((m) => ({
-      filePath: m.metadata?.filePath ?? m.id,
-      score: m.score,
-    }));
+    // 4. Filter by a Similarity Threshold
+    // Only keep files that actually match (e.g., score > 0.5) 
+    // to avoid showing irrelevant "random" files.
+    const SIMILARITY_THRESHOLD = 0.4; 
 
+    const relevantFiles = queryResult.matches
+      .filter((m) => m.score !== undefined && m.score > SIMILARITY_THRESHOLD)
+      .map((m) => ({
+        filePath: m.metadata?.filePath ?? m.id,
+        score: m.score,
+      }));
+
+    // 5. Final Update
     await prisma.pullRequest.update({
       where: { id: prId },
-      data: { analysisStatus: 'completed', relevantFiles },
+      data: { 
+        analysisStatus: 'completed', 
+        relevantFiles: relevantFiles // Prisma handles the JSON structure
+      },
     });
 
     logger.info(
-      `PR analysis [PR #${pr.number}]: completed — ${relevantFiles.length} relevant files found`,
+      `PR analysis [PR #${pr.number}]: completed — ${relevantFiles.length} files met threshold`,
     );
+
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error(`PR analysis [prId=${prId}]: FAILED — ${message}`);
+    
     await prisma.pullRequest.update({
       where: { id: prId },
       data: { analysisStatus: 'failed', analysisError: message },
