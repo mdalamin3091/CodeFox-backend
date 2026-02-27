@@ -267,3 +267,61 @@ export async function embedRepository(repoId: string): Promise<void> {
     });
   }
 }
+
+// --------------------------------------------------------------------------
+// PR diff analysis — embed diff, query Pinecone, store relevant files
+// --------------------------------------------------------------------------
+
+export async function analyzePrDiff(prId: string): Promise<void> {
+  const pr = await prisma.pullRequest.findUnique({
+    where: { id: prId },
+    select: { id: true, number: true, diff: true, repositoryId: true },
+  });
+
+  if (!pr?.diff) {
+    logger.warn(`PR analysis [prId=${prId}]: no diff available, skipping`);
+    return;
+  }
+
+  await prisma.pullRequest.update({
+    where: { id: prId },
+    data: { analysisStatus: 'processing', analysisError: null },
+  });
+
+  try {
+    // 1. Embed the diff (truncated to avoid token limits)
+    const diffText = pr.diff.length > MAX_CONTENT_CHARS ? pr.diff.slice(0, MAX_CONTENT_CHARS) : pr.diff;
+    const [diffVector] = await batchEmbed([diffText], config.googleAiApiKey);
+
+    // 2. Query Pinecone namespace for this repo (top 10 most similar files)
+    const pinecone = new Pinecone({ apiKey: config.pineconeApiKey });
+    const index = pinecone.index({ name: config.pineconeIndex }).namespace(pr.repositoryId);
+
+    const queryResult = await index.query({
+      vector: diffVector,
+      topK: 10,
+      includeMetadata: true,
+    });
+
+    const relevantFiles = queryResult.matches.map((m) => ({
+      filePath: m.metadata?.filePath ?? m.id,
+      score: m.score,
+    }));
+
+    await prisma.pullRequest.update({
+      where: { id: prId },
+      data: { analysisStatus: 'completed', relevantFiles },
+    });
+
+    logger.info(
+      `PR analysis [PR #${pr.number}]: completed — ${relevantFiles.length} relevant files found`,
+    );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(`PR analysis [prId=${prId}]: FAILED — ${message}`);
+    await prisma.pullRequest.update({
+      where: { id: prId },
+      data: { analysisStatus: 'failed', analysisError: message },
+    });
+  }
+}

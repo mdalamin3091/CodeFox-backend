@@ -76,6 +76,9 @@ model PullRequest {
   changedFiles    Int        @default(0)
   diff            String?
   files           Json?
+  analysisStatus  String?
+  relevantFiles   Json?
+  analysisError   String?
   closedAt        DateTime?
   mergedAt        DateTime?
   createdAt       DateTime   @default(now())

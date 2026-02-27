@@ -3,6 +3,7 @@ import { Octokit } from '@octokit/rest';
 import { Prisma } from '@prisma/client';
 import prisma from '../../config/prisma.js';
 import logger from '../../utils/logger.js';
+import { analyzePrDiff } from '../embedding/embedding.service.js';
 
 // --------------------------------------------------------------------------
 // HMAC-SHA256 signature verification
@@ -128,4 +129,17 @@ export async function handlePullRequestEvent(payload: Record<string, any>): Prom
   });
   
   logger.info(`Webhook: PR #${pr.number as number} (${action}) saved for ${repo.fullName}`);
+
+  // Trigger diff analysis if we have a diff (fire-and-forget — don't block webhook response)
+  if (diff && ['opened', 'synchronize', 'reopened'].includes(action)) {
+    const saved = await prisma.pullRequest.findUnique({
+      where: { repositoryId_number: { repositoryId: repo.id, number: pr.number as number } },
+      select: { id: true },
+    });
+    if (saved) {
+      analyzePrDiff(saved.id).catch((err) =>
+        logger.error(`PR analysis fire-and-forget failed for PR #${pr.number as number}: ${err}`),
+      );
+    }
+  }
 }
