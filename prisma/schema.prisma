@@ -39,10 +39,13 @@ model Repository {
   defaultBranch String       @default("main")
   topics        String[]
   pushedAt      DateTime?
-  connected     Boolean      @default(false)
-  webhookId     Int?
-  webhookSecret String?
-  connectedAt   DateTime?
+  connected        Boolean      @default(false)
+  webhookId        Int?
+  webhookSecret    String?
+  connectedAt      DateTime?
+  embeddingStatus  String?
+  embeddedAt       DateTime?
+  embeddingError   String?
   userId        String
   user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   syncedAt      DateTime     @default(now()) @updatedAt

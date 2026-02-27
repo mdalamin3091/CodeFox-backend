@@ -14,6 +14,9 @@ const config = {
     clientSecret: process.env.GITHUB_CLIENT_SECRET || '',
   },
   webhookBaseUrl: process.env.WEBHOOK_BASE_URL || 'http://localhost:4000',
+  googleAiApiKey: process.env.GOOGLE_AI_API_KEY || '',
+  pineconeApiKey: process.env.PINECONE_API_KEY || '',
+  pineconeIndex: process.env.PINECONE_INDEX || 'codefox',
 };
 
 export default config;

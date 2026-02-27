@@ -3,6 +3,7 @@ import { Octokit } from '@octokit/rest';
 import prisma from '../../config/prisma.js';
 import ApiError from '../../utils/ApiError.js';
 import config from '../../config/index.js';
+import { embeddingQueue } from '../embedding/embedding.queue.js';
 import type { ListReposQuery } from './repo.schema.js';
 
 // --------------------------------------------------------------------------
@@ -33,7 +34,8 @@ export async function syncRepos(userId: string) {
   const githubRepos = await octokit.paginate(octokit.repos.listForAuthenticatedUser, {
     per_page: 100,
     sort: 'updated',
-    affiliation: 'owner,collaborator,organization_member',
+    affiliation: 'owner',
+    // affiliation: 'owner,collaborator,organization_member',
   });
 
   // Upsert all repos in parallel (batched to avoid connection exhaustion)
@@ -155,6 +157,8 @@ export async function listRepos(userId: string, query: ListReposQuery) {
         syncedAt: true,
         connected: true,
         connectedAt: true,
+        embeddingStatus: true,
+        embeddedAt: true,
       },
     }),
     prisma.repository.count({ where }),
@@ -224,8 +228,19 @@ export async function connectRepo(userId: string, repoId: string) {
 
   await prisma.repository.update({
     where: { id: repoId },
-    data: { connected: true, webhookId: hook.id, webhookSecret: secret, connectedAt: new Date() },
+    data: {
+      connected: true,
+      webhookId: hook.id,
+      webhookSecret: secret,
+      connectedAt: new Date(),
+      embeddingStatus: 'pending',
+      embeddedAt: null,
+      embeddingError: null,
+    },
   });
+
+  // Enqueue embedding job — BullMQ processes it in the background
+  await embeddingQueue.add('embed-repo', { repoId });
 
   return { connected: true, webhookId: hook.id };
 }
@@ -252,7 +267,15 @@ export async function disconnectRepo(userId: string, repoId: string) {
 
   await prisma.repository.update({
     where: { id: repoId },
-    data: { connected: false, webhookId: null, webhookSecret: null, connectedAt: null },
+    data: {
+      connected: false,
+      webhookId: null,
+      webhookSecret: null,
+      connectedAt: null,
+      embeddingStatus: null,
+      embeddedAt: null,
+      embeddingError: null,
+    },
   });
 
   return { connected: false };
