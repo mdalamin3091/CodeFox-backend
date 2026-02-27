@@ -22,7 +22,7 @@ model User {
 }
 
 model Repository {
-  id            String    @id @default(cuid())
+  id            String       @id @default(cuid())
   githubId      Int
   name          String
   fullName      String
@@ -30,22 +30,59 @@ model Repository {
   htmlUrl       String
   cloneUrl      String
   sshUrl        String
-  private       Boolean   @default(false)
-  fork          Boolean   @default(false)
+  private       Boolean      @default(false)
+  fork          Boolean      @default(false)
   language      String?
-  starCount     Int       @default(0)
-  forkCount     Int       @default(0)
-  openIssues    Int       @default(0)
-  defaultBranch String    @default("main")
+  starCount     Int          @default(0)
+  forkCount     Int          @default(0)
+  openIssues    Int          @default(0)
+  defaultBranch String       @default("main")
   topics        String[]
   pushedAt      DateTime?
+  connected     Boolean      @default(false)
+  webhookId     Int?
+  webhookSecret String?
+  connectedAt   DateTime?
   userId        String
-  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  syncedAt      DateTime  @default(now()) @updatedAt
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  syncedAt      DateTime     @default(now()) @updatedAt
+  pullRequests  PullRequest[]
 
   @@unique([userId, githubId])
   @@index([userId])
   @@map("repository")
+}
+
+model PullRequest {
+  id              String     @id @default(cuid())
+  githubPrId      BigInt
+  number          Int
+  title           String
+  body            String?
+  state           String
+  merged          Boolean    @default(false)
+  htmlUrl         String
+  headSha         String
+  baseSha         String
+  headRef         String
+  baseRef         String
+  authorLogin     String
+  authorAvatarUrl String?
+  additions       Int        @default(0)
+  deletions       Int        @default(0)
+  changedFiles    Int        @default(0)
+  diff            String?
+  files           Json?
+  closedAt        DateTime?
+  mergedAt        DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  repositoryId    String
+  repository      Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, number])
+  @@index([repositoryId])
+  @@map("pull_request")
 }
 
 model Session {

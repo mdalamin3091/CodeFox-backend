@@ -15,6 +15,7 @@ declare global {
         createdAt: Date;
         updatedAt: Date;
       };
+      rawBody?: Buffer;
     }
   }
 }

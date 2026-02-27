@@ -42,7 +42,13 @@ const createApp = () => {
   // better-auth handles its own body parsing — mount BEFORE express.json()
   app.all('/api/auth/*', toNodeHandler(auth));
 
-  app.use(express.json());
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => {
+        (req as Request).rawBody = buf;
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true }));
 
   app.get('/health', (_req: Request, res: Response) => {

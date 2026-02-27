@@ -13,6 +13,7 @@ const config = {
     clientId: process.env.GITHUB_CLIENT_ID || '',
     clientSecret: process.env.GITHUB_CLIENT_SECRET || '',
   },
+  webhookBaseUrl: process.env.WEBHOOK_BASE_URL || 'http://localhost:4000',
 };
 
 export default config;

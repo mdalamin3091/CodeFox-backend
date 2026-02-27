@@ -1,6 +1,8 @@
+import crypto from 'crypto';
 import { Octokit } from '@octokit/rest';
 import prisma from '../../config/prisma.js';
 import ApiError from '../../utils/ApiError.js';
+import config from '../../config/index.js';
 import type { ListReposQuery } from './repo.schema.js';
 
 // --------------------------------------------------------------------------
@@ -151,6 +153,8 @@ export async function listRepos(userId: string, query: ListReposQuery) {
         topics: true,
         pushedAt: true,
         syncedAt: true,
+        connected: true,
+        connectedAt: true,
       },
     }),
     prisma.repository.count({ where }),
@@ -181,4 +185,111 @@ export async function getRepo(userId: string, id: string) {
   }
 
   return repo;
+}
+
+// --------------------------------------------------------------------------
+// Connect repo: install GitHub webhook
+// --------------------------------------------------------------------------
+
+export async function connectRepo(userId: string, repoId: string) {
+  const repo = await prisma.repository.findFirst({ where: { id: repoId, userId } });
+  if (!repo) throw new ApiError(404, 'Repository not found');
+  if (repo.connected) throw new ApiError(409, 'Repository already connected');
+
+  const token = await getGitHubAccessToken(userId);
+  const octokit = new Octokit({ auth: token });
+  const [owner, repoName] = repo.fullName.split('/');
+
+  const secret = crypto.randomBytes(32).toString('hex');
+  const webhookUrl = `${config.webhookBaseUrl}/api/webhooks/github`;
+
+  let hook: Awaited<ReturnType<typeof octokit.repos.createWebhook>>['data'];
+  try {
+    ({ data: hook } = await octokit.repos.createWebhook({
+      owner,
+      repo: repoName,
+      config: { url: webhookUrl, content_type: 'json', secret, insecure_ssl: '0' },
+      events: ['pull_request'],
+      active: true,
+    }));
+  } catch (err: any) {
+    if (err?.status === 404 || err?.status === 403) {
+      throw new ApiError(
+        403,
+        `Cannot install webhook on "${repo.fullName}". You need admin access to this repository. Only repos you own or have admin rights to can be connected.`,
+      );
+    }
+    throw err;
+  }
+
+  await prisma.repository.update({
+    where: { id: repoId },
+    data: { connected: true, webhookId: hook.id, webhookSecret: secret, connectedAt: new Date() },
+  });
+
+  return { connected: true, webhookId: hook.id };
+}
+
+// --------------------------------------------------------------------------
+// Disconnect repo: remove GitHub webhook
+// --------------------------------------------------------------------------
+
+export async function disconnectRepo(userId: string, repoId: string) {
+  const repo = await prisma.repository.findFirst({ where: { id: repoId, userId } });
+  if (!repo) throw new ApiError(404, 'Repository not found');
+  if (!repo.connected || !repo.webhookId) throw new ApiError(400, 'Repository is not connected');
+
+  const token = await getGitHubAccessToken(userId);
+  const octokit = new Octokit({ auth: token });
+  const [owner, repoName] = repo.fullName.split('/');
+
+  try {
+    await octokit.repos.deleteWebhook({ owner, repo: repoName, hook_id: repo.webhookId });
+  } catch (err: any) {
+    // Webhook already removed on GitHub side — still clean up our DB
+    if (err?.status !== 404) throw err;
+  }
+
+  await prisma.repository.update({
+    where: { id: repoId },
+    data: { connected: false, webhookId: null, webhookSecret: null, connectedAt: null },
+  });
+
+  return { connected: false };
+}
+
+// --------------------------------------------------------------------------
+// List pull requests for a connected repo
+// --------------------------------------------------------------------------
+
+export async function listPullRequests(userId: string, repoId: string) {
+  const repo = await prisma.repository.findFirst({ where: { id: repoId, userId } });
+  if (!repo) throw new ApiError(404, 'Repository not found');
+
+  const prs = await prisma.pullRequest.findMany({
+    where: { repositoryId: repoId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      githubPrId: true,
+      number: true,
+      title: true,
+      state: true,
+      merged: true,
+      htmlUrl: true,
+      headRef: true,
+      baseRef: true,
+      authorLogin: true,
+      authorAvatarUrl: true,
+      additions: true,
+      deletions: true,
+      changedFiles: true,
+      createdAt: true,
+      updatedAt: true,
+      closedAt: true,
+      mergedAt: true,
+    },
+  });
+
+  return prs;
 }

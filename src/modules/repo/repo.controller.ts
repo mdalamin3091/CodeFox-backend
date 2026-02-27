@@ -35,3 +35,30 @@ export const getRepoHandler = catchAsync(async (req: Request, res: Response) => 
     data: { repo },
   });
 });
+
+export const connectRepoHandler = catchAsync(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!id) throw new ApiError(400, 'Repository id is required');
+
+  const result = await repoService.connectRepo(req.user!.id, id);
+
+  res.status(200).json({ success: true, data: result });
+});
+
+export const disconnectRepoHandler = catchAsync(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!id) throw new ApiError(400, 'Repository id is required');
+
+  const result = await repoService.disconnectRepo(req.user!.id, id);
+
+  res.status(200).json({ success: true, data: result });
+});
+
+export const listPullRequestsHandler = catchAsync(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  if (!id) throw new ApiError(400, 'Repository id is required');
+
+  const prs = await repoService.listPullRequests(req.user!.id, id);
+
+  res.status(200).json({ success: true, data: { pullRequests: prs } });
+});
