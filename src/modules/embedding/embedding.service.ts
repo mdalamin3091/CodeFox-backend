@@ -3,47 +3,60 @@ import { Octokit } from '@octokit/rest';
 import prisma from '../../config/prisma.js';
 import config from '../../config/index.js';
 import logger from '../../utils/logger.js';
-// import { GoogleGenerativeAI } from "@google/generative-ai";
 import {GoogleGenAI} from '@google/genai';
 
-
 // --------------------------------------------------------------------------
-// File exclusion rules
+// File inclusion whitelist — only these are worth embedding
 // --------------------------------------------------------------------------
 
-const EXCLUDED_DIRS = new Set([
-  'node_modules', 'dist', 'build', 'out', '.next', '.nuxt', '.svelte-kit',
-  '__pycache__', '.git', 'vendor', 'coverage', '.nyc_output', '.cache',
-  'tmp', 'temp', '.turbo', '.vercel', 'target', 'bin', 'obj',
-  '.idea', '.vscode', 'venv', '.venv', '.tox', '.pytest_cache',
-  'Pods', 'DerivedData', '.gradle', '.mvn',
+// Extensions that contain meaningful source/config content
+const ALLOWED_EXTENSIONS = new Set([
+  // Web
+  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
+  '.html', '.htm', '.css', '.scss', '.sass', '.less',
+  '.vue', '.svelte', '.astro',
+  // Backend / systems
+  '.py', '.pyx', '.pyi',
+  '.go',
+  '.rs',
+  '.java', '.kt', '.kts',
+  '.cs', '.fs', '.fsi', '.fsx',
+  '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp',
+  '.rb',
+  '.php',
+  '.swift',
+  '.scala',
+  '.dart',
+  '.ex', '.exs',
+  '.erl', '.hrl',
+  '.hs', '.lhs',
+  '.ml', '.mli',
+  '.clj', '.cljs',
+  '.lua',
+  '.r',
+  // Shell / scripting
+  '.sh', '.bash', '.zsh', '.fish',
+  '.ps1', '.psm1',
+  '.pl', '.pm',
+  // Config / data / markup
+  '.json', '.jsonc',
+  '.yaml', '.yml',
+  '.toml',
+  '.xml',
+  '.graphql', '.gql',
+  '.proto',
+  '.sql',
+  '.tf', '.tfvars',
+  // Docs (useful for context)
+  '.md', '.mdx',
 ]);
 
-const EXCLUDED_FILENAMES = new Set([
-  'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
-  'Cargo.lock', 'poetry.lock', 'Gemfile.lock', 'composer.lock',
-  'Pipfile.lock', 'go.sum',
-]);
-
-const EXCLUDED_EXTENSIONS = new Set([
-  // Images
-  '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp', '.avif', '.bmp', '.tiff',
-  // Video / audio
-  '.mp4', '.mp3', '.wav', '.avi', '.mov', '.mkv', '.flac', '.ogg',
-  // Documents
-  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-  // Compiled / binary
-  '.class', '.pyc', '.pyo', '.o', '.obj', '.so', '.dll', '.exe', '.bin', '.wasm', '.jar',
-  // Archives
-  '.zip', '.tar', '.gz', '.rar', '.7z', '.bz2',
-  // Fonts
-  '.ttf', '.otf', '.woff', '.woff2', '.eot',
-  // Minified
-  '.min.js', '.min.css',
-  // Source maps
-  '.map',
-  // Env (security — never embed)
-  '.env', '.pem', '.key', '.cert', '.p12', '.pfx',
+// Extension-less filenames that are worth embedding
+const ALLOWED_BARE_FILENAMES = new Set([
+  'Makefile', 'Dockerfile', 'Jenkinsfile', 'Procfile',
+  'Rakefile', 'Gemfile', 'Vagrantfile', 'Brewfile',
+  '.editorconfig',
+  '.prettierrc', '.eslintrc', '.stylelintrc'
 ]);
 
 /**
@@ -97,35 +110,19 @@ const EMBED_BATCH = 20;           // embedMany batch size (smaller = fewer rate-
 const PINECONE_BATCH = 100;       // Pinecone upsert batch size
 const FETCH_CONCURRENCY = 8;      // parallel blob fetches
 
-function shouldExclude(filePath: string, sizeBytes?: number): boolean {
-  if (sizeBytes !== undefined && sizeBytes > MAX_FILE_BYTES) return true;
+function shouldInclude(filePath: string, sizeBytes?: number): boolean {
+  // Hard size cap regardless of type
+  if (sizeBytes !== undefined && sizeBytes > MAX_FILE_BYTES) return false;
 
   const parts = filePath.split('/');
   const filename = parts[parts.length - 1];
-
-  // Exclude directories in path
-  for (let i = 0; i < parts.length - 1; i++) {
-    if (EXCLUDED_DIRS.has(parts[i])) return true;
-  }
-
-  // Hidden files (except useful ones like .gitignore, .env.example)
-  if (
-    filename.startsWith('.') &&
-    !filename.startsWith('.env.example') &&
-    filename !== '.gitignore' &&
-    filename !== '.gitattributes' &&
-    filename !== '.editorconfig' &&
-    filename !== '.prettierrc' &&
-    filename !== '.eslintrc'
-  ) {
-    return true;
-  }
-
-  if (EXCLUDED_FILENAMES.has(filename)) return true;
-
-  // Extension check (handle compound extensions like .min.js)
   const lower = filename.toLowerCase();
-  for (const ext of EXCLUDED_EXTENSIONS) {
+
+  // Bare filenames with no extension (Makefile, Dockerfile, etc.)
+  if (ALLOWED_BARE_FILENAMES.has(filename)) return true;
+
+  // Match by extension (longest suffix first handles .min.js, .d.ts, etc.)
+  for (const ext of ALLOWED_EXTENSIONS) {
     if (lower.endsWith(ext)) return true;
   }
 
@@ -226,7 +223,7 @@ export async function embedRepository(repoId: string): Promise<void> {
         item.type === 'blob' &&
         item.path &&
         item.sha &&
-        !shouldExclude(item.path, item.size),
+        shouldInclude(item.path, item.size),
     );
 
     logger.info(`Embedding [${repo.fullName}]: ${eligibleFiles.length} eligible files (${treeData.tree?.length ?? 0} total)`);
