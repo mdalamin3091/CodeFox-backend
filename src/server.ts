@@ -1,4 +1,9 @@
 import 'dotenv/config';
+
+// Allow BigInt values to be serialized as strings in JSON responses
+(BigInt.prototype as unknown as { toJSON: () => string }).toJSON = function () {
+  return this.toString();
+};
 import createApp from './app';
 import config from './config';
 import logger from './utils/logger';

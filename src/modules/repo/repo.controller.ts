@@ -60,5 +60,10 @@ export const listPullRequestsHandler = catchAsync(async (req: Request, res: Resp
 
   const prs = await repoService.listPullRequests(req.user!.id, id);
 
-  res.status(200).json({ success: true, data: { pullRequests: prs } });
+  const serializable = prs.map((pr) => ({
+    ...pr,
+    githubReviewId: pr.githubReviewId != null ? pr.githubReviewId.toString() : null,
+  }));
+
+  res.status(200).json({ success: true, data: { pullRequests: serializable } });
 });
