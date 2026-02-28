@@ -171,6 +171,22 @@ async function fetchFilesInBatches(
 }
 
 // --------------------------------------------------------------------------
+// Delete all vectors for a repository namespace (used on disconnect)
+// --------------------------------------------------------------------------
+
+export async function deleteRepositoryEmbedding(repoId: string): Promise<void> {
+  try {
+    const pc = new Pinecone({ apiKey: config.pineconeApiKey });
+    const index = pc.index({ name: config.pineconeIndex });
+    await index.namespace(repoId).deleteAll();
+    logger.info(`[embedding] Deleted Pinecone namespace for repo ${repoId}`);
+  } catch (err) {
+    // Cleanup failure must not block the disconnect flow
+    logger.warn(`[embedding] Failed to delete Pinecone namespace for repo ${repoId}`, { err });
+  }
+}
+
+// --------------------------------------------------------------------------
 // Main embedding job
 // --------------------------------------------------------------------------
 

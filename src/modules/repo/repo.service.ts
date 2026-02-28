@@ -4,6 +4,7 @@ import prisma from '../../config/prisma.js';
 import ApiError from '../../utils/ApiError.js';
 import config from '../../config/index.js';
 import { embeddingQueue } from '../embedding/embedding.queue.js';
+import { deleteRepositoryEmbedding } from '../embedding/embedding.service.js';
 import type { ListReposQuery } from './repo.schema.js';
 
 // --------------------------------------------------------------------------
@@ -226,6 +227,9 @@ export async function connectRepo(userId: string, repoId: string) {
     throw err;
   }
 
+  // If the repo was previously disconnected with "keep context", skip re-embedding
+  const alreadyEmbedded = repo.embeddingStatus === 'completed';
+
   await prisma.repository.update({
     where: { id: repoId },
     data: {
@@ -233,23 +237,28 @@ export async function connectRepo(userId: string, repoId: string) {
       webhookId: hook.id,
       webhookSecret: secret,
       connectedAt: new Date(),
-      embeddingStatus: 'pending',
-      embeddedAt: null,
-      embeddingError: null,
+      // Only reset embedding fields when there is no existing context
+      ...(!alreadyEmbedded && {
+        embeddingStatus: 'pending',
+        embeddedAt: null,
+        embeddingError: null,
+      }),
     },
   });
 
-  // Enqueue embedding job — BullMQ processes it in the background
-  await embeddingQueue.add('embed-repo', { repoId });
+  // Enqueue embedding job only if there is no existing Pinecone context
+  if (!alreadyEmbedded) {
+    await embeddingQueue.add('embed-repo', { repoId });
+  }
 
-  return { connected: true, webhookId: hook.id };
+  return { connected: true, webhookId: hook.id, contextReused: alreadyEmbedded };
 }
 
 // --------------------------------------------------------------------------
 // Disconnect repo: remove GitHub webhook
 // --------------------------------------------------------------------------
 
-export async function disconnectRepo(userId: string, repoId: string) {
+export async function disconnectRepo(userId: string, repoId: string, keepContext: boolean) {
   const repo = await prisma.repository.findFirst({ where: { id: repoId, userId } });
   if (!repo) throw new ApiError(404, 'Repository not found');
   if (!repo.connected || !repo.webhookId) throw new ApiError(400, 'Repository is not connected');
@@ -265,6 +274,11 @@ export async function disconnectRepo(userId: string, repoId: string) {
     if (err?.status !== 404) throw err;
   }
 
+  // Delete Pinecone namespace only when the user opted to remove context
+  if (!keepContext) {
+    await deleteRepositoryEmbedding(repoId);
+  }
+
   await prisma.repository.update({
     where: { id: repoId },
     data: {
@@ -272,13 +286,16 @@ export async function disconnectRepo(userId: string, repoId: string) {
       webhookId: null,
       webhookSecret: null,
       connectedAt: null,
-      embeddingStatus: null,
-      embeddedAt: null,
-      embeddingError: null,
+      // Clear embedding fields only when context is discarded
+      ...(!keepContext && {
+        embeddingStatus: null,
+        embeddedAt: null,
+        embeddingError: null,
+      }),
     },
   });
 
-  return { connected: false };
+  return { connected: false, contextKept: keepContext };
 }
 
 // --------------------------------------------------------------------------

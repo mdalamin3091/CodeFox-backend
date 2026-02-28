@@ -49,7 +49,10 @@ export const disconnectRepoHandler = catchAsync(async (req: Request, res: Respon
   const { id } = req.params;
   if (!id) throw new ApiError(400, 'Repository id is required');
 
-  const result = await repoService.disconnectRepo(req.user!.id, id);
+  // keepContext=true → preserve Pinecone vectors; false → delete namespace
+  const keepContext = req.body?.keepContext === true;
+
+  const result = await repoService.disconnectRepo(req.user!.id, id, keepContext);
 
   res.status(200).json({ success: true, data: result });
 });
