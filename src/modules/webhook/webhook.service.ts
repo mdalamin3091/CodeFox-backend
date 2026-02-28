@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import prisma from '../../config/prisma.js';
 import logger from '../../utils/logger.js';
 import { analyzePrDiff } from '../embedding/embedding.service.js';
+import { generatePrReview } from '../review/review.service.js';
 
 // --------------------------------------------------------------------------
 // HMAC-SHA256 signature verification
@@ -137,9 +138,12 @@ export async function handlePullRequestEvent(payload: Record<string, any>): Prom
       select: { id: true },
     });
     if (saved) {
-      analyzePrDiff(saved.id).catch((err) =>
-        logger.error(`PR analysis fire-and-forget failed for PR #${pr.number as number}: ${err}`),
-      );
+      // Pipeline: analyze diff → generate AI review (all background, non-blocking)
+      analyzePrDiff(saved.id)
+        .then(() => generatePrReview(saved.id))
+        .catch((err) =>
+          logger.error(`PR pipeline failed for PR #${pr.number as number}: ${err}`),
+        );
     }
   }
 }

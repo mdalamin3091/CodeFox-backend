@@ -294,7 +294,6 @@ export async function analyzePrDiff(prId: string): Promise<void> {
     select: { id: true, number: true, diff: true, repositoryId: true },
   });
 
-  console.log("pr", pr);
   if (!pr?.diff) {
     logger.warn(`PR analysis [prId=${prId}]: no diff available, skipping`);
     return;

@@ -79,6 +79,11 @@ model PullRequest {
   analysisStatus  String?
   relevantFiles   Json?
   analysisError   String?
+  reviewStatus    String?
+  reviewBody      String?
+  reviewData      Json?
+  reviewError     String?
+  githubReviewId  BigInt?
   closedAt        DateTime?
   mergedAt        DateTime?
   createdAt       DateTime   @default(now())
