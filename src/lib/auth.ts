@@ -9,7 +9,6 @@ export const auth = betterAuth({
 
   trustedOrigins: [
     process.env.FRONTEND_URL || 'http://localhost:3000',
-    // 'https://codefox-frontend-production.up.railway.app',
     'http://localhost:3000',
     'http://localhost:3001',
   ],
@@ -21,5 +20,4 @@ export const auth = betterAuth({
       scope: ['repo'],
     },
   },
-  
 });
