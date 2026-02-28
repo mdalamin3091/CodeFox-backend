@@ -21,4 +21,17 @@ export const auth = betterAuth({
       scope: ['repo'],
     },
   },
+
+  advanced: {
+    useSecureCookies: true,
+    defaultCookieAttributes: {
+      sameSite: 'none',
+      secure: true,
+      partitioned: true,
+    },
+  },
+
+  account: {
+    skipStateCookieCheck: true,
+  },
 });
