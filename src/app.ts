@@ -39,6 +39,26 @@ const createApp = () => {
     }),
   );
 
+  // Explicit CORS for better-auth routes — toNodeHandler builds its own
+  // response and may not preserve headers set by the global cors() middleware.
+  // Setting headers here via res.setHeader() guarantees they survive.
+  app.use('/api/auth', (req: Request, res: Response, next: NextFunction) => {
+    const origin = req.headers.origin as string | undefined;
+    if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Vary', 'Origin');
+    }
+    if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Cookie');
+      res.setHeader('Access-Control-Max-Age', '86400');
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   // better-auth handles its own body parsing — mount BEFORE express.json()
   app.all('/api/auth/*', toNodeHandler(auth));
 
