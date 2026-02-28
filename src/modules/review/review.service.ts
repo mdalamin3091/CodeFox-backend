@@ -9,138 +9,186 @@ import logger from "../../utils/logger.js";
 // --------------------------------------------------------------------------
 
 const REVIEW_MODEL = "gemini-2.5-flash";
-const MAX_DIFF_CHARS = 12_000;
-const MAX_FILE_CHARS = 6_000;
-const MAX_FILES_IN_PROMPT = 5;
+const MAX_PATCH_CHARS = 8_000;  // per-file patch truncation
+const CHUNK_SIZE = 5;           // files per Gemini call
+const MAX_CONCURRENT = 3;       // max parallel Gemini calls
+
+// Extensions to skip — no logic to review
+const SKIP_EXTENSIONS = new Set([
+  ".lock", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+  ".woff", ".woff2", ".ttf", ".eot", ".otf",
+  ".min.js", ".min.css", ".map",
+  ".pdf", ".zip", ".tar", ".gz",
+  ".gitignore", ".md",
+]);
 
 // --------------------------------------------------------------------------
 // Types
 // --------------------------------------------------------------------------
+
+interface PrFile {
+  filename: string;
+  status: string;
+  patch?: string;
+  additions: number;
+  deletions: number;
+}
 
 interface ReviewIssue {
   file: string;
   line?: string | number;
   severity: "high" | "medium" | "low";
   comment?: string;
-  message?: string;
 }
 
 interface InlineComment {
-  path: string;        // file path in the repo
-  line: number;        // line number in the new (right) side of the diff
+  path: string;
+  line: number;
   severity: "high" | "medium" | "low";
-  title: string;       // short one-line title
-  body: string;        // detailed explanation
-  suggestion?: string; // optional replacement code for GitHub suggestion block
+  title: string;
+  body: string;
+  proposedFix?: string;   // diff-style snippet (- old / + new)
+  suggestion?: string;    // full replacement for GitHub suggestion block
+  agentPrompt?: string;   // instruction for AI agents
 }
 
-interface ReviewResult {
-  summary: string;
+interface ChunkResult {
   issues: ReviewIssue[];
-  inlineComments?: InlineComment[];
-  suggestions?: string[];
-  verdict?: "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
+  inlineComments: InlineComment[];
 }
 
 // --------------------------------------------------------------------------
-// Parse valid (path → line set) from stored PR files patches
+// File filtering & prioritisation
+// --------------------------------------------------------------------------
+
+function shouldSkipForReview(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  for (const ext of SKIP_EXTENSIONS) {
+    if (lower.endsWith(ext)) return true;
+  }
+  // Skip generated / lock files by name
+  const base = lower.split("/").pop() ?? lower;
+  if (
+    base === "package-lock.json" ||
+    base === "yarn.lock" ||
+    base === "pnpm-lock.yaml" ||
+    base === "bun.lockb" ||
+    base === "go.sum" ||
+    base === "cargo.lock"
+  )
+    return true;
+  // Skip snapshot / fixture files
+  if (lower.includes("__snapshots__") || lower.includes(".snap")) return true;
+  return false;
+}
+
+function filePriority(filename: string): number {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  const code = ["ts", "tsx", "js", "jsx", "py", "go", "java", "rs", "cpp", "c", "cs", "rb", "php", "swift", "kt"];
+  const config = ["json", "yaml", "yml", "toml", "env", "config"];
+  if (code.includes(ext)) return 3;
+  if (config.includes(ext)) return 1;
+  return 2;
+}
+
+// --------------------------------------------------------------------------
+// Parse valid diff lines per file (path → Set<lineNumber>)
 // --------------------------------------------------------------------------
 
 function getValidDiffLines(
   files: Array<{ filename: string; patch?: string }>,
 ): Map<string, Set<number>> {
   const result = new Map<string, Set<number>>();
-
   for (const file of files) {
     if (!file.patch) continue;
-    const validLines = new Set<number>();
-    let currentLine = 0;
-
+    const valid = new Set<number>();
+    let cur = 0;
     for (const line of file.patch.split("\n")) {
-      const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-      if (hunkMatch) {
-        currentLine = parseInt(hunkMatch[1], 10) - 1;
-        continue;
-      }
-      if (line.startsWith("-")) continue; // removed — no line number in new file
-      currentLine++;
-      validLines.add(currentLine); // added (+) and context lines are both valid
+      const m = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) { cur = parseInt(m[1], 10) - 1; continue; }
+      if (line.startsWith("-")) continue;
+      valid.add(++cur);
     }
-
-    result.set(file.filename, validLines);
+    result.set(file.filename, valid);
   }
-
   return result;
 }
 
 // --------------------------------------------------------------------------
-// Format inline comment body (CodeRabbit style)
+// Inline comment body formatter (CodeRabbit style)
 // --------------------------------------------------------------------------
 
 function buildInlineCommentBody(c: InlineComment): string {
-  const severityLabel =
+  const label =
     c.severity === "high"
       ? "⚠️ Potential issue | 🔴 High"
       : c.severity === "medium"
         ? "⚠️ Potential issue | 🟠 Major"
-        : "💡 Suggestion | 🟢 Minor";
+        : "⚠️ Potential issue | 🟡 Minor";
 
-  const lines: string[] = [
-    `${severityLabel}`,
-    "",
-    `**${c.title}**`,
-    "",
-    c.body,
-  ];
+  const lines: string[] = [label, "", `**${c.title}**`, "", c.body];
+
+  if (c.proposedFix) {
+    lines.push("", "🛡️ **Proposed fix**", "```diff", c.proposedFix, "```");
+  }
 
   if (c.suggestion) {
-    lines.push("", "```suggestion", c.suggestion, "```");
+    lines.push(
+      "",
+      "📝 **Committable suggestion**",
+      "> ‼️ **IMPORTANT**",
+      "> Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.",
+      "",
+      "```suggestion",
+      c.suggestion,
+      "```",
+    );
+  }
+
+  if (c.agentPrompt) {
+    lines.push("", "🤖 **Prompt for AI Agents**", c.agentPrompt);
   }
 
   return lines.join("\n");
 }
 
 // --------------------------------------------------------------------------
-// Build overall review body from structured output
+// Overall review body
 // --------------------------------------------------------------------------
 
-function buildReviewBody(review: ReviewResult, inlineCount: number): string {
-  const lines: string[] = [];
-  lines.push(`## 🤖 AI Code Review\n`);
-  lines.push(`### Summary\n${review.summary}\n`);
+function buildReviewBody(
+  summary: string,
+  issues: ReviewIssue[],
+  inlineCount: number,
+  verdict: string,
+): string {
+  const lines: string[] = [`## 🤖 AI Code Review\n`, `### Summary\n${summary}\n`];
 
-  if (review.issues.length > 0) {
-    lines.push(`### Issues`);
-    for (const issue of review.issues) {
-      const icon =
-        issue.severity === "high"
-          ? "🔴"
-          : issue.severity === "medium"
-            ? "🟡"
-            : "🟢";
-      const location = issue.file
-        ? issue.line
-          ? `\`${issue.file}:${issue.line}\``
-          : `\`${issue.file}\``
+  if (issues.length > 0) {
+    lines.push("### Issues");
+    for (const issue of issues) {
+      const icon = issue.severity === "high" ? "🔴" : issue.severity === "medium" ? "🟡" : "🟢";
+      const loc = issue.file
+        ? issue.line ? `\`${issue.file}:${issue.line}\`` : `\`${issue.file}\``
         : "";
-      lines.push(
-        `- ${icon} **[${issue.severity.toUpperCase()}]** ${location} ${issue.comment ?? issue.message ?? ""}`,
-      );
+      lines.push(`- ${icon} **[${issue.severity.toUpperCase()}]** ${loc} ${issue.comment ?? ""}`);
     }
     lines.push("");
   } else {
-    lines.push(`### Issues\n_No issues found._\n`);
-  }
-
-  if (review.suggestions?.length) {
-    lines.push(`### Suggestions`);
-    for (const s of review.suggestions) lines.push(`- ${s}`);
-    lines.push("");
+    lines.push("### Issues\n_No issues found._\n");
   }
 
   if (inlineCount > 0) {
-    lines.push(`_${inlineCount} inline comment(s) posted on specific lines._`);
+    lines.push(`_${inlineCount} inline comment(s) posted on specific lines._\n`);
   }
+
+  const verdictLine =
+    verdict === "APPROVE"
+      ? "✅ **Verdict: APPROVE** — Looks good to merge."
+      : verdict === "REQUEST_CHANGES"
+        ? "❌ **Verdict: REQUEST CHANGES** — Issues need to be addressed."
+        : "💬 **Verdict: COMMENT** — Review notes posted.";
+  lines.push(verdictLine);
 
   return lines.join("\n");
 }
@@ -149,77 +197,120 @@ function buildReviewBody(review: ReviewResult, inlineCount: number): string {
 // Helpers
 // --------------------------------------------------------------------------
 
-async function fetchFileAtRef(
-  octokit: Octokit,
-  owner: string,
-  repo: string,
-  path: string,
-  ref: string,
-): Promise<string | null> {
-  try {
-    const { data } = await octokit.repos.getContent({ owner, repo, path, ref });
-    if ("content" in data && typeof data.content === "string") {
-      const raw = Buffer.from(data.content, "base64").toString("utf-8");
-      return raw.length > MAX_FILE_CHARS
-        ? raw.slice(0, MAX_FILE_CHARS) + "\n... (truncated)"
-        : raw;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+
+function parseJson<T>(raw: string): T {
+  const cleaned = raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
+  return JSON.parse(cleaned) as T;
 }
 
-function buildPrompt(
-  diff: string,
-  files: Array<{ path: string; content: string }>,
-): string {
-  const filesSection = files.length
-    ? files
-        .map((f) => `### ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
-        .join("\n\n")
-    : "_No relevant files fetched._";
+// --------------------------------------------------------------------------
+// Per-chunk Gemini call
+// --------------------------------------------------------------------------
 
-  return `You are a senior software engineer performing a professional code review.
+async function processFileChunk(
+  files: PrFile[],
+  genAI: GoogleGenAI,
+  logger_: typeof logger,
+): Promise<ChunkResult> {
+  const filesSection = files
+    .map((f) => {
+      const patch = f.patch
+        ? f.patch.length > MAX_PATCH_CHARS
+          ? f.patch.slice(0, MAX_PATCH_CHARS) + "\n... (truncated)"
+          : f.patch
+        : "(no patch)";
+      return `### ${f.filename} (+${f.additions} -${f.deletions})\n\`\`\`diff\n${patch}\n\`\`\``;
+    })
+    .join("\n\n");
 
-Pull Request Diff:
--------------------
-${diff}
+  const prompt = `You are reviewing specific files in a pull request. Only report actual bugs, errors, security vulnerabilities, null-dereferences, or potential crashes. Do NOT report style preferences or praise.
 
-Relevant Existing Code Context:
--------------------------------
+Files changed:
 ${filesSection}
 
-Instructions:
-- Detect bugs, performance issues, security vulnerabilities, breaking changes
-- Identify specific lines in the diff that need attention
-- For each issue on a specific line, include it in "inlineComments" with the exact line number from the diff
-- Provide a short title, detailed explanation, and optionally a code suggestion (the replacement code only, no diff markers)
-- Be concise and structured
-
-Return ONLY valid JSON matching this exact shape:
+Return ONLY valid JSON:
 {
-  "summary": "2-3 sentence overview of what the PR does",
   "issues": [
-    {
-      "file": "path/to/file",
-      "line": 15,
-      "severity": "low|medium|high",
-      "comment": "short description"
-    }
+    { "file": "path", "line": 0, "severity": "high|medium|low", "comment": "short description" }
   ],
   "inlineComments": [
     {
       "path": "path/to/file",
-      "line": 15,
-      "severity": "low|medium|high",
-      "title": "Short descriptive title",
-      "body": "Detailed explanation of the issue",
-      "suggestion": "optional replacement code (omit field if no suggestion)"
+      "line": 0,
+      "severity": "high|medium|low",
+      "title": "Short descriptive title of the problem",
+      "body": "Detailed explanation of why this is a problem",
+      "proposedFix": "- old line\\n+ fixed line\\n  context line",
+      "suggestion": "full replacement code block (no diff markers)",
+      "agentPrompt": "In path/to/file at line N, find X and replace with Y because Z"
     }
-  ],
-  "verdict": "APPROVE|REQUEST_CHANGES|COMMENT"
+  ]
 }`;
+
+  try {
+    const response = await genAI.models.generateContent({
+      model: REVIEW_MODEL,
+      contents: prompt,
+      config: { responseMimeType: "application/json" },
+    });
+    const result = parseJson<ChunkResult>(response.text ?? "");
+    return {
+      issues: result.issues ?? [],
+      inlineComments: result.inlineComments ?? [],
+    };
+  } catch (err) {
+    logger_.warn(`Review chunk failed for [${files.map((f) => f.filename).join(", ")}]: ${err}`);
+    return { issues: [], inlineComments: [] };
+  }
+}
+
+// --------------------------------------------------------------------------
+// Summary + verdict from merged results
+// --------------------------------------------------------------------------
+
+async function generateSummary(
+  issues: ReviewIssue[],
+  totalFiles: number,
+  genAI: GoogleGenAI,
+): Promise<{ summary: string; verdict: "APPROVE" | "REQUEST_CHANGES" | "COMMENT" }> {
+  const issueList = issues.length
+    ? issues.map((i) => `- [${i.severity}] ${i.file}: ${i.comment}`).join("\n")
+    : "No issues found.";
+
+  const prompt = `You reviewed a pull request spanning ${totalFiles} changed files and found these issues:
+
+${issueList}
+
+Write a 2-3 sentence overall summary and choose a verdict.
+
+Return ONLY valid JSON:
+{ "summary": "...", "verdict": "APPROVE|REQUEST_CHANGES|COMMENT" }`;
+
+  try {
+    const response = await genAI.models.generateContent({
+      model: REVIEW_MODEL,
+      contents: prompt,
+      config: { responseMimeType: "application/json" },
+    });
+    const result = parseJson<{ summary: string; verdict: "APPROVE" | "REQUEST_CHANGES" | "COMMENT" }>(
+      response.text ?? "",
+    );
+    return {
+      summary: result.summary ?? "Review completed.",
+      verdict: ["APPROVE", "REQUEST_CHANGES", "COMMENT"].includes(result.verdict)
+        ? result.verdict
+        : "COMMENT",
+    };
+  } catch {
+    const highCount = issues.filter((i) => i.severity === "high").length;
+    return {
+      summary: `Reviewed ${totalFiles} files. Found ${issues.length} issue(s).`,
+      verdict: highCount > 0 ? "REQUEST_CHANGES" : issues.length > 0 ? "COMMENT" : "APPROVE",
+    };
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -232,9 +323,7 @@ export async function generatePrReview(prId: string): Promise<void> {
     include: {
       repository: {
         include: {
-          user: {
-            include: { accounts: { where: { providerId: "github" } } },
-          },
+          user: { include: { accounts: { where: { providerId: "github" } } } },
         },
       },
     },
@@ -256,120 +345,108 @@ export async function generatePrReview(prId: string): Promise<void> {
 
     const [owner, repoName] = pr.repository.fullName.split("/");
     const octokit = new Octokit({ auth: accessToken });
+    const genAI = new GoogleGenAI({ apiKey: config.googleAiApiKey });
 
-    // 1. Fetch content of top relevant files at the PR's head commit
-    const relevantFiles =
-      (pr.relevantFiles as Array<{ filePath: string; score: number }> | null) ?? [];
-
-    const fileContents: Array<{ path: string; content: string }> = [];
-    for (const { filePath } of relevantFiles.slice(0, MAX_FILES_IN_PROMPT)) {
-      const content = await fetchFileAtRef(octokit, owner, repoName, filePath, pr.headSha);
-      if (content) fileContents.push({ path: filePath, content });
-    }
+    // 1. Parse changed files — filter and prioritise
+    const allPrFiles = (pr.files as PrFile[] | null) ?? [];
+    const reviewableFiles = allPrFiles
+      .filter((f) => f.status !== "removed" && f.patch && !shouldSkipForReview(f.filename))
+      .sort((a, b) => filePriority(b.filename) - filePriority(a.filename));
 
     logger.info(
-      `Review [PR #${pr.number}]: fetched ${fileContents.length} context files, building prompt`,
+      `Review [PR #${pr.number}]: ${reviewableFiles.length}/${allPrFiles.length} files are reviewable`,
     );
 
-    // 2. Build prompt
-    const diff =
-      pr.diff.length > MAX_DIFF_CHARS
-        ? pr.diff.slice(0, MAX_DIFF_CHARS) + "\n... (truncated)"
-        : pr.diff;
-    const prompt = buildPrompt(diff, fileContents);
+    // 2. Chunk files
+    const chunks: PrFile[][] = [];
+    for (let i = 0; i < reviewableFiles.length; i += CHUNK_SIZE) {
+      chunks.push(reviewableFiles.slice(i, i + CHUNK_SIZE));
+    }
 
-    // 3. Call Gemini
-    const genAI = new GoogleGenAI({ apiKey: config.googleAiApiKey });
-    const response = await genAI.models.generateContent({
-      model: REVIEW_MODEL,
-      contents: prompt,
-      config: { responseMimeType: "application/json" },
+    // 3. Process chunks with concurrency limit
+    const allIssues: ReviewIssue[] = [];
+    const allInlineComments: InlineComment[] = [];
+
+    for (let i = 0; i < chunks.length; i += MAX_CONCURRENT) {
+      const batch = chunks.slice(i, i + MAX_CONCURRENT);
+      const results = await Promise.all(
+        batch.map((chunk) => processFileChunk(chunk, genAI, logger)),
+      );
+      for (const r of results) {
+        allIssues.push(...r.issues);
+        allInlineComments.push(...r.inlineComments);
+      }
+      logger.info(
+        `Review [PR #${pr.number}]: processed chunks ${i + 1}–${Math.min(i + MAX_CONCURRENT, chunks.length)} of ${chunks.length}`,
+      );
+    }
+
+    // 4. Filter inline comments to lines that actually exist in the diff
+    const validDiffLines = getValidDiffLines(allPrFiles);
+    const inlineComments = allInlineComments.filter((c) => {
+      const valid = validDiffLines.get(c.path);
+      return valid && valid.has(Number(c.line));
     });
 
-    const rawText = response.text ?? "";
-
-    // 4. Parse JSON output
-    let review: ReviewResult;
-    try {
-      review = JSON.parse(rawText) as ReviewResult;
-    } catch {
-      throw new Error(`Gemini returned non-JSON response: ${rawText.slice(0, 300)}`);
-    }
-
-    // 5. Build valid inline comments (only lines actually in the diff)
-    const prFiles =
-      (pr.files as Array<{ filename: string; patch?: string }> | null) ?? [];
-    const validDiffLines = getValidDiffLines(prFiles);
-
-    const inlineComments = (review.inlineComments ?? [])
-      .filter((c) => {
-        const validLines = validDiffLines.get(c.path);
-        return validLines && validLines.has(Number(c.line));
-      })
-      .map((c) => ({
-        path: c.path,
-        line: Number(c.line),
-        side: "RIGHT" as const,
-        body: buildInlineCommentBody(c),
-      }));
-
     logger.info(
-      `Review [PR #${pr.number}]: ${inlineComments.length}/${review.inlineComments?.length ?? 0} inline comments are on valid diff lines`,
+      `Review [PR #${pr.number}]: ${allIssues.length} issues, ${inlineComments.length}/${allInlineComments.length} valid inline comments`,
     );
 
-    // 6. Build overall review body
-    const reviewBody = buildReviewBody(review, inlineComments.length);
+    // 5. Generate overall summary
+    const { summary, verdict } = await generateSummary(allIssues, reviewableFiles.length, genAI);
 
-    // Validate verdict
-    const validVerdicts = ["APPROVE", "REQUEST_CHANGES", "COMMENT"] as const;
-    if (!review.verdict || !validVerdicts.includes(review.verdict)) {
-      review.verdict = "COMMENT";
-    }
+    // 6. Build review body
+    const reviewBody = buildReviewBody(summary, allIssues, inlineComments.length, verdict);
 
-    // 7. Post review to GitHub (with inline comments)
-    // GitHub rejects REQUEST_CHANGES when reviewer is the PR author — fall back to COMMENT
+    // 7. Format inline comments for GitHub
+    const githubComments = inlineComments.map((c) => ({
+      path: c.path,
+      line: Number(c.line),
+      side: "RIGHT" as const,
+      body: buildInlineCommentBody(c),
+    }));
+
+    // 8. Post review to GitHub
+    // Also fetch relevant context files for the review (used in step 3 above, passed below for reference)
     let ghReviewId: number;
-    try {
+    const postReview = async (event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT") => {
       const ghReview = await octokit.rest.pulls.createReview({
         owner,
         repo: repoName,
         pull_number: pr.number,
         body: reviewBody,
-        event: review.verdict,
-        comments: inlineComments,
+        event,
+        comments: githubComments,
       });
-      ghReviewId = ghReview.data.id;
+      return ghReview.data.id;
+    };
+
+    try {
+      ghReviewId = await postReview(verdict);
     } catch (ghErr: unknown) {
       const msg = ghErr instanceof Error ? ghErr.message : String(ghErr);
       if (msg.toLowerCase().includes("own pull request")) {
-        const ghReview = await octokit.rest.pulls.createReview({
-          owner,
-          repo: repoName,
-          pull_number: pr.number,
-          body: reviewBody,
-          event: "COMMENT",
-          comments: inlineComments,
-        });
-        ghReviewId = ghReview.data.id;
-        review.verdict = "COMMENT";
+        ghReviewId = await postReview("COMMENT");
       } else {
         throw ghErr;
       }
     }
 
-    // 8. Persist to DB
+    // 9. Persist to DB
     await prisma.pullRequest.update({
       where: { id: prId },
       data: {
         reviewStatus: "completed",
-        reviewBody: reviewBody,
-        reviewData: JSON.parse(JSON.stringify(review)),
+        reviewBody,
+        reviewData: JSON.parse(
+          JSON.stringify({ summary, verdict, issues: allIssues, inlineComments }),
+        ),
         githubReviewId: BigInt(ghReviewId),
       },
     });
 
     logger.info(
-      `Review [PR #${pr.number}]: DONE — verdict=${review.verdict}, inline=${inlineComments.length}, posted to GitHub (reviewId=${ghReviewId})`,
+      `Review [PR #${pr.number}]: DONE — verdict=${verdict}, issues=${allIssues.length}, inline=${inlineComments.length}, chunks=${chunks.length} (reviewId=${ghReviewId})`,
     );
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
