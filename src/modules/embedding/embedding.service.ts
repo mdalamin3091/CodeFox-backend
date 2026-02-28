@@ -66,20 +66,34 @@ function cleanDiff(diff: string): string {
 // which does not expose text-embedding-004
 // --------------------------------------------------------------------------
 
-async function batchEmbed(texts: string[], apiKey: string): Promise<number[][]> {
+async function batchEmbed(texts: string[], apiKey: string, retries = 4): Promise<number[][]> {
   const genAI = new GoogleGenAI({ apiKey });
-  const result = await genAI.models.embedContent({
-    model: 'gemini-embedding-001',
-    contents: texts,
-  });
-
-  if (!result.embeddings) throw new Error('No embeddings returned from Gemini');
-  return result.embeddings.map((e) => e.values ?? []);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await genAI.models.embedContent({
+        model: 'gemini-embedding-001',
+        contents: texts,
+      });
+      if (!result.embeddings) throw new Error('No embeddings returned from Gemini');
+      return result.embeddings.map((e) => e.values ?? []);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const is429 = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED');
+      if (is429 && attempt < retries) {
+        const delay = Math.min(2 ** attempt * 5_000, 60_000); // 5s, 10s, 20s, 40s
+        logger.warn(`Embedding rate limited (attempt ${attempt + 1}/${retries + 1}), retrying in ${delay / 1000}s…`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('batchEmbed: exhausted retries');
 }
 
 const MAX_FILE_BYTES = 150_000;    // skip files > 150 KB
 const MAX_CONTENT_CHARS = 10_000; // truncate content at ~2500 tokens
-const EMBED_BATCH = 50;           // embedMany batch size
+const EMBED_BATCH = 20;           // embedMany batch size (smaller = fewer rate-limit hits)
 const PINECONE_BATCH = 100;       // Pinecone upsert batch size
 const FETCH_CONCURRENCY = 8;      // parallel blob fetches
 

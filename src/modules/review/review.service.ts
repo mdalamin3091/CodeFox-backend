@@ -226,7 +226,11 @@ async function processFileChunk(
     })
     .join("\n\n");
 
-  const prompt = `You are reviewing specific files in a pull request. Only report actual bugs, errors, security vulnerabilities, null-dereferences, or potential crashes. Do NOT report style preferences or praise.
+  const prompt = `You are reviewing specific files in a pull request. Add an inline comment when you find ANY of the following:
+- Bugs, errors, null-dereferences, or potential crashes
+- Security vulnerabilities (XSS, SQL injection, hardcoded secrets, etc.)
+- Major code improvements: significantly better algorithm, missing error handling, poor async/await usage, unnecessary re-renders, N+1 queries, memory leaks, race conditions, missing input validation, or any pattern that will clearly cause problems at scale
+Do NOT comment on: minor style preferences, naming conventions, formatting, or trivial suggestions.
 
 Files changed:
 ${filesSection}
