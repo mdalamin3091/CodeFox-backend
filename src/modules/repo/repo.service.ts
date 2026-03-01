@@ -35,8 +35,8 @@ export async function syncRepos(userId: string) {
   const githubRepos = await octokit.paginate(octokit.repos.listForAuthenticatedUser, {
     per_page: 100,
     sort: 'updated',
-    affiliation: 'owner',
-    // affiliation: 'owner,collaborator,organization_member',
+    // affiliation: 'owner',
+    affiliation: 'owner,collaborator,organization_member',
   });
 
   // Upsert all repos in parallel (batched to avoid connection exhaustion)
