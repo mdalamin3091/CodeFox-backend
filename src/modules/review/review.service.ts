@@ -162,7 +162,7 @@ function buildReviewBody(
   inlineCount: number,
   verdict: string,
 ): string {
-  const lines: string[] = [`## 🤖 AI Code Review\n`, `### Summary\n${summary}\n`];
+  const lines: string[] = [`## 🤖 CodeFox AI Review\n`, `### Summary\n${summary}\n`];
 
   if (issues.length > 0) {
     lines.push("### Issues");
